@@ -13,8 +13,8 @@ android {
         applicationId = "io.github.stopscrolling.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0-beta"
+        versionCode = 3
+        versionName = "0.2.1-beta"
     }
 
     buildTypes {

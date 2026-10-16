@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import io.github.stopscrolling.app.OnboardingActivity
 import io.github.stopscrolling.app.util.PermissionChecker
 
@@ -163,7 +164,9 @@ object AutoGrantController {
         }
         if (granted) return true
 
-        val root = service.rootInActiveWindow ?: return false
+        // 选根窗口：必须跳过自家窗口（盖板/停止按钮都是本应用的悬浮窗），
+        // 否则会被误判为"用户回到自己界面"，链条当场自杀
+        val root = activeRootOutsideSelf(service) ?: return false
 
         // 回到了自己的界面（非通知弹窗流程）→ 停止轮询，链条由 ON_RESUME 续推
         if (root.packageName == service.packageName && step != "notifications") {
@@ -172,11 +175,41 @@ object AutoGrantController {
         }
 
         return when (step) {
-            "usage", "overlay" -> grantViaAppRowAndSwitch(service, root)
+            // 确认弹窗优先：一旦弹出就必须先点掉，再找列表行
+            "accessibility" ->
+                clickConfirm(root, listOf("确定", "允许", "开启", "OK", "OK, got it")) ||
+                    grantViaAppRowAndSwitch(service, root)
+            "usage", "overlay" ->
+                clickConfirm(root, listOf("允许", "确定", "Allow", "OK")) ||
+                    grantViaAppRowAndSwitch(service, root)
             "admin" -> clickAction(root, listOf("激活", "启用", "Activate", "Turn on", "Aktivieren"))
             "battery", "notifications" -> clickAllow(root)
             else -> false
         }
+    }
+
+    /** 取"非本应用"窗口的根节点：遍历所有窗口，跳过自家的盖板/停止按钮 */
+    private fun activeRootOutsideSelf(service: AccessibilityService): AccessibilityNodeInfo? {
+        val windows: List<AccessibilityWindowInfo> = try {
+            service.windows ?: emptyList()
+        } catch (_: Throwable) {
+            emptyList()
+        }
+        if (windows.isNotEmpty()) {
+            // 优先取 z 序最高的非自家窗口
+            for (i in windows.indices.reversed()) {
+                val root = try {
+                    windows[i].root
+                } catch (_: Throwable) {
+                    null
+                }
+                val pkg = root?.packageName?.toString()
+                if (root != null && pkg != null && pkg != service.packageName) return root
+            }
+            return null
+        }
+        val root = service.rootInActiveWindow ?: return null
+        return if (root.packageName == service.packageName) null else root
     }
 
     /** 应用列表/详情页通用路径：行内开关 → 行点击 → 详情页唯一开关 → 滚动 */
@@ -288,11 +321,23 @@ object AutoGrantController {
         return null
     }
 
-    /** 统一走冷却 + 手势点击（ACTION_CLICK 在部分 ROM 的设置页不生效） */
+    /**
+     * 点击执行：优先 ACTION_CLICK（不走输入管线、不怕遮挡窗口吃触摸），
+     * 失败再手势点击兜底（部分 ROM 的设置页节点 ACTION_CLICK 无效）。
+     */
     private fun AccessibilityNodeInfo.performClickSafe(): Boolean {
         if (!cooldownOk()) return false
-        val service = GuardAccessibilityService.current ?: return false
         val node = if (isClickable) this else clickableAncestor() ?: return false
+        val byAction = try {
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } catch (_: Exception) {
+            false
+        }
+        if (byAction) {
+            lastClickAt = System.currentTimeMillis()
+            return true
+        }
+        val service = GuardAccessibilityService.current ?: return false
         val rect = android.graphics.Rect()
         node.getBoundsInScreen(rect)
         if (rect.isEmpty) return false
@@ -311,6 +356,21 @@ object AutoGrantController {
         return dispatched
     }
 
+    /** 确认按钮（如无障碍开启前的「确定/允许」弹窗），含安全排除否定词 */
+    private fun clickConfirm(root: AccessibilityNodeInfo, keywords: List<String>): Boolean {
+        val denyWords = listOf("取消", "不允许", "拒绝", "Cancel", "Deny", "Don't allow")
+        var node = findNodeByText(root, keywords, exact = true)?.clickableAncestor()
+        if (node == null) {
+            node = findNodeByText(root, keywords, exact = false)?.clickableAncestor()
+        }
+        if (node != null) {
+            val text = (node.text?.toString() ?: "") + (node.contentDescription?.toString() ?: "")
+            if (denyWords.any { text.contains(it, ignoreCase = true) }) return false
+            return node.performClickSafe()
+        }
+        return false
+    }
+
     /**
      * 弹窗按钮点击：先精确匹配「允许」，再包含匹配（排除「不允许」）。
      */
@@ -321,11 +381,7 @@ object AutoGrantController {
         for (kw in allowWords) {
             val node = findNodeByText(root, listOf(kw), exact = true)?.clickableAncestor()
             if (node != null) {
-                return try {
-                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                } catch (_: Exception) {
-                    false
-                }
+                return node.performClickSafe()
             }
         }
         // 包含匹配，排除拒绝词
@@ -346,11 +402,7 @@ object AutoGrantController {
             if (isAllow && !isDeny) {
                 val target = node.clickableAncestor()
                 if (target != null) {
-                    return try {
-                        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    } catch (_: Exception) {
-                        false
-                    }
+                    return target.performClickSafe()
                 }
             }
             for (i in 0 until node.childCount) {
@@ -362,11 +414,7 @@ object AutoGrantController {
 
     private fun clickAction(root: AccessibilityNodeInfo, keywords: List<String>): Boolean {
         val node = findNodeByText(root, keywords, exact = false)?.clickableAncestor() ?: return false
-        return try {
-            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-        } catch (_: Exception) {
-            false
-        }
+        return node.performClickSafe()
     }
 
     private fun scrollDown(service: AccessibilityService) {
