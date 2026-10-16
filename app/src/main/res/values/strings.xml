@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">放下手机</string>
+    <string name="onboarding_title">使用引导</string>
+    <string name="accessibility_service_label">放下手机 · 守门员</string>
+    <string name="accessibility_service_description">开启后，「放下手机」可以检测你打开了哪个应用。当某个受管应用超过当日使用限额时，会自动弹出拦截页，帮你放下手机。\n\n本服务不会读取、记录或上传你的任何屏幕内容。</string>
+
+    <string name="home_title">放下手机</string>
+    <string name="today_screen_time">今日屏幕时间</string>
+    <string name="guarded_apps">受管应用</string>
+    <string name="no_guarded_apps">还没有添加受管应用。\n点击右下角 + 选择要管理的应用，为它们设定每日使用限额。</string>
+    <string name="add_apps">添加应用</string>
+    <string name="used_of_limit">已用 %1$s / 限额 %2$d 分钟</string>
+    <string name="blocked_today">今日已拦截 %1$d 次</string>
+    <string name="limit_reached">已超限</string>
+    <string name="remove">移除</string>
+    <string name="quick_add_short_video">一键添加常见短视频应用</string>
+    <string name="delete">删除</string>
+
+    <string name="pick_title">选择要管理的应用</string>
+    <string name="pick_search_hint">搜索应用</string>
+    <string name="pick_today_used">今日 %1$s</string>
+    <string name="add">添加</string>
+    <string name="added">已添加</string>
+
+    <string name="settings_title">设置</string>
+    <string name="perm_section">权限</string>
+    <string name="perm_usage">用量统计权限</string>
+    <string name="perm_usage_desc">用于统计各应用今日使用时长</string>
+    <string name="perm_accessibility">无障碍服务</string>
+    <string name="perm_accessibility_desc">用于检测前台应用切换并触发拦截</string>
+    <string name="perm_overlay">悬浮窗权限</string>
+    <string name="perm_overlay_desc">允许拦截页在其他应用之上弹出</string>
+    <string name="perm_admin">设备管理员</string>
+    <string name="perm_admin_desc">一键锁屏、防卸载加固</string>
+    <string name="perm_battery">忽略电池优化</string>
+    <string name="perm_battery_desc">防止服务被系统杀掉</string>
+    <string name="perm_notifications">通知权限</string>
+    <string name="perm_notifications_desc">专注模式倒计时通知</string>
+    <string name="granted">已开启</string>
+    <string name="not_granted">未开启</string>
+    <string name="focus_section">专注锁定</string>
+    <string name="focus_desc">锁定期间，任何受管应用都无法打开，屏幕将被强制锁定。</string>
+    <string name="focus_start_15">专注 15 分钟</string>
+    <string name="focus_start_25">专注 25 分钟</string>
+    <string name="focus_start_45">专注 45 分钟</string>
+    <string name="focus_start_60">专注 60 分钟</string>
+    <string name="focus_running">专注中，剩余 %1$s</string>
+    <string name="focus_stop">结束专注</string>
+    <string name="about_section">关于</string>
+    <string name="about_desc">放下手机 StopScrolling —— 一个开源的防沉迷工具，帮你少刷短视频、多看世界。</string>
+
+    <string name="gatekeeper_persuasion">你今天已经刷了 %1$s 的「%2$s」</string>
+    <string name="gatekeeper_subtitle">超过限额了。深呼吸，看看窗外的世界。</string>
+    <string name="gatekeeper_leave">放下手机</string>
+    <string name="gatekeeper_extra5">再刷 5 分钟（今日仅此一次）</string>
+    <string name="focus_lock_title">专注锁定中</string>
+    <string name="focus_lock_subtitle">还有 %1$s 结束。这段时间，去做更重要的事吧。</string>
+    <string name="notification_focus_channel">专注模式</string>
+    <string name="notification_focus_title">专注进行中</string>
+    <string name="notification_focus_text">剩余 %1$s，受管应用已被锁定</string>
+</resources>

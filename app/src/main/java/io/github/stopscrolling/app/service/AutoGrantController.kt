@@ -1,0 +1,380 @@
+package io.github.stopscrolling.app.service
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.content.Intent
+import android.graphics.Path
+import android.os.Handler
+import android.os.Looper
+import android.view.accessibility.AccessibilityNodeInfo
+import io.github.stopscrolling.app.util.PermissionChecker
+
+/**
+ * 自动授权引擎：利用无障碍能力读取系统设置界面，代替用户点击开关/按钮。
+ *
+ * 关键策略（对照原版行为 + Android 系统限制得出的教训）：
+ * 1. 只点"本应用所在行"内部或行可到达的开关，绝不点列表里其他应用的开关；
+ * 2. 详情页启发式：屏幕同时出现本应用名 + 唯一一个未勾选开关时才点它；
+ * 3. 弹窗按钮先精确匹配「允许」，包含匹配时排除「不允许」；
+ * 4. 轮询发现回到自己界面时立即停止（交还 ON_RESUME 链条续推）；
+ * 5. 超时只停止本步轮询，由引导页在返回前台时重试或手动接管。
+ */
+object AutoGrantController {
+
+    @Volatile
+    var activeStepId: String? = null
+        private set
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var onDone: ((String, Boolean) -> Unit)? = null
+    private var onStopped: (() -> Unit)? = null
+    private var appLabel: String = ""
+    private var attempts = 0
+    private var scrolls = 0
+    private var lastClickAt = 0L
+
+    /** 需要盖板遮蔽界面的步骤（悬浮窗授权之后才可能生效） */
+    private val coveredSteps = setOf("usage", "admin", "battery")
+    private val stepTitles = mapOf(
+        "usage" to "开启「使用情况访问权限」",
+        "admin" to "激活设备管理员",
+        "battery" to "申请电池优化白名单"
+    )
+
+    private const val TICK_MS = 700L
+    private const val MAX_ATTEMPTS = 90 // 约 1 分钟后放弃，回落到手动
+    private const val MAX_SCROLLS = 6
+    private const val CLICK_COOLDOWN_MS = 1200L
+    private const val MAX_SCAN_NODES = 400
+
+    fun start(
+        stepId: String,
+        label: String,
+        done: (String, Boolean) -> Unit,
+        stopped: (() -> Unit)? = null
+    ) {
+        stop()
+        activeStepId = stepId
+        appLabel = label
+        onDone = done
+        onStopped = stopped
+        attempts = 0
+        scrolls = 0
+        handler.postDelayed(tickRunnable, TICK_MS)
+    }
+
+    fun stop() {
+        activeStepId = null
+        onDone = null
+        onStopped = null
+        handler.removeCallbacks(tickRunnable)
+    }
+
+    /** 用户点盖板上的「停止」：终止链条、移除盖板、回到应用 */
+    fun userCancel() {
+        val wasActive = activeStepId != null
+        val stoppedCallback = onStopped
+        stop()
+        AutoGrantCover.hide()
+        if (wasActive) returnToApp()
+        stoppedCallback?.invoke()
+    }
+
+    private fun returnToApp() {
+        val service = GuardAccessibilityService.current ?: return
+        try {
+            val intent = Intent(service.applicationContext, Class.forName(
+                "io.github.stopscrolling.app.OnboardingActivity"
+            )).addFlags(
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            )
+            service.launchActivity(intent)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            val step = activeStepId ?: return
+            val service = GuardAccessibilityService.current
+            if (service == null) {
+                scheduleNext()
+                return
+            }
+            attempts++
+            if (attempts > MAX_ATTEMPTS) {
+                finish(step, false)
+                return
+            }
+            // 需要遮蔽的步骤：已授予悬浮窗权限时盖上盖板（不抢焦点，
+            // 底下窗口照常被读取和点击；用户看到的只有盖板）
+            if (step in coveredSteps &&
+                android.provider.Settings.canDrawOverlays(service.applicationContext) &&
+                !AutoGrantCover.shown
+            ) {
+                AutoGrantCover.show(
+                    service.applicationContext,
+                    stepTitles[step] ?: "正在授权…"
+                ) { userCancel() }
+            }
+            val ok = try {
+                tick(service, step)
+            } catch (_: Exception) {
+                false
+            }
+            if (ok) {
+                finish(step, true)
+                return
+            }
+            scheduleNext()
+        }
+    }
+
+    private fun scheduleNext() {
+        if (activeStepId != null) handler.postDelayed(tickRunnable, TICK_MS)
+    }
+
+    private fun finish(step: String, success: Boolean) {
+        activeStepId = null
+        handler.removeCallbacks(tickRunnable)
+        if (!success) {
+            // 失败/超时：移除盖板并回到引导页（若不在前台），交还重试或手动
+            if (step != "notifications") {
+                AutoGrantCover.hide()
+                returnToApp()
+            }
+        }
+        val done = onDone
+        onDone = null
+        onStopped = null
+        done?.invoke(step, success)
+    }
+
+    private fun tick(service: AccessibilityService, step: String): Boolean {
+        val ctx = service.applicationContext
+        val granted = when (step) {
+            "accessibility" -> PermissionChecker.accessibilityServiceEnabled(ctx)
+            "usage" -> PermissionChecker.hasUsageAccess(ctx)
+            "overlay" -> android.provider.Settings.canDrawOverlays(ctx)
+            "admin" -> PermissionChecker.isAdminActive(ctx)
+            "battery" -> PermissionChecker.isIgnoringBatteryOptimizations(ctx)
+            "notifications" -> android.os.Build.VERSION.SDK_INT < 33 ||
+                ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            else -> true
+        }
+        if (granted) return true
+
+        val root = service.rootInActiveWindow ?: return false
+
+        // 回到了自己的界面（非通知弹窗流程）→ 停止轮询，链条由 ON_RESUME 续推
+        if (root.packageName == service.packageName && step != "notifications") {
+            finish(step, false)
+            return false
+        }
+
+        return when (step) {
+            "usage", "overlay" -> grantViaAppRowAndSwitch(service, root)
+            "admin" -> clickAction(root, listOf("激活", "启用", "Activate", "Turn on", "Aktivieren"))
+            "battery", "notifications" -> clickAllow(root)
+            else -> false
+        }
+    }
+
+    /** 应用列表/详情页通用路径：行内开关 → 行点击 → 详情页唯一开关 → 滚动 */
+    private fun grantViaAppRowAndSwitch(
+        service: AccessibilityService,
+        root: AccessibilityNodeInfo
+    ): Boolean {
+        val labelNode = findNodeByText(root, listOf(appLabel), exact = false)
+        if (labelNode != null) {
+            // 1) 本应用所在行内部有未勾选开关（列表式开关，如悬浮窗列表）→ 只点这个
+            val row = labelNode.clickableAncestor()
+            val rowSwitch = row?.let { findUncheckedSwitchIn(it) }
+            if (rowSwitch != null) {
+                if (cooldownOk()) {
+                    rowSwitch.performClickSafe()
+                    lastClickAt = System.currentTimeMillis()
+                    scrolls = 0
+                }
+                return false
+            }
+            // 2) 行内无开关 → 点行本身进入详情页
+            if (row != null) {
+                if (cooldownOk()) {
+                    row.performClickSafe()
+                    lastClickAt = System.currentTimeMillis()
+                    scrolls = 0
+                }
+                return false
+            }
+            // 3) 行不可点击（标签在标题区）→ 详情页启发式：唯一未勾选开关才点
+            val switches = findUncheckedSwitches(root)
+            if (switches.size == 1 && cooldownOk()) {
+                switches[0].performClickSafe()
+                lastClickAt = System.currentTimeMillis()
+            }
+            return false
+        }
+        // 4) 找不到本应用行 → 滑动列表查找
+        if (scrolls < MAX_SCROLLS && cooldownOk()) {
+            scrollDown(service)
+            scrolls++
+            lastClickAt = System.currentTimeMillis()
+        }
+        return false
+    }
+
+    private fun cooldownOk(): Boolean =
+        System.currentTimeMillis() - lastClickAt > CLICK_COOLDOWN_MS
+
+    // ---- 节点查找与操作 ----
+
+    private fun findNodeByText(
+        root: AccessibilityNodeInfo,
+        keywords: List<String>,
+        exact: Boolean
+    ): AccessibilityNodeInfo? {
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < MAX_SCAN_NODES) {
+            val node = queue.removeFirst()
+            scanned++
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val hit = keywords.any { kw ->
+                if (exact) text == kw || desc == kw
+                else (text.isNotEmpty() && text.contains(kw, ignoreCase = true)) ||
+                    (desc.isNotEmpty() && desc.contains(kw, ignoreCase = true))
+            }
+            if (hit) return node
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return null
+    }
+
+    /** 找一个未勾选的 Switch / Checkable 控件 */
+    private fun findUncheckedSwitchIn(node: AccessibilityNodeInfo): AccessibilityNodeInfo? =
+        findUncheckedSwitches(node, 200).firstOrNull()
+
+    private fun findUncheckedSwitches(
+        root: AccessibilityNodeInfo,
+        limit: Int = MAX_SCAN_NODES
+    ): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < limit) {
+            val node = queue.removeFirst()
+            scanned++
+            val cls = node.className?.toString() ?: ""
+            if (node.isCheckable && !node.isChecked &&
+                (cls.endsWith("Switch") || cls.endsWith("CheckBox") || cls.endsWith("ToggleButton"))
+            ) {
+                result.add(node)
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return result
+    }
+
+    private fun AccessibilityNodeInfo.clickableAncestor(): AccessibilityNodeInfo? {
+        var node: AccessibilityNodeInfo? = this
+        var hops = 0
+        while (node != null && hops < 8) {
+            if (node.isClickable) return node
+            node = node.parent
+            hops++
+        }
+        return null
+    }
+
+    private fun AccessibilityNodeInfo.performClickSafe(): Boolean =
+        try {
+            if (isClickable) performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            else clickableAncestor()
+                ?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+        } catch (_: Exception) {
+            false
+        }
+
+    /**
+     * 弹窗按钮点击：先精确匹配「允许」，再包含匹配（排除「不允许」）。
+     */
+    private fun clickAllow(root: AccessibilityNodeInfo): Boolean {
+        val allowWords = listOf("允许", "Allow", "Zulassen")
+        val denyWords = listOf("不允许", "拒绝", "Don't allow", "Deny", "Nicht zulassen")
+        // 精确匹配优先
+        for (kw in allowWords) {
+            val node = findNodeByText(root, listOf(kw), exact = true)?.clickableAncestor()
+            if (node != null) {
+                return try {
+                    node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        }
+        // 包含匹配，排除拒绝词
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < MAX_SCAN_NODES) {
+            val node = queue.removeFirst()
+            scanned++
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val isAllow = allowWords.any { kw ->
+                (text.contains(kw, ignoreCase = true) || desc.contains(kw, ignoreCase = true))
+            }
+            val isDeny = denyWords.any { kw ->
+                (text.contains(kw, ignoreCase = true) || desc.contains(kw, ignoreCase = true))
+            }
+            if (isAllow && !isDeny) {
+                val target = node.clickableAncestor()
+                if (target != null) {
+                    return try {
+                        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
+        }
+        return false
+    }
+
+    private fun clickAction(root: AccessibilityNodeInfo, keywords: List<String>): Boolean {
+        val node = findNodeByText(root, keywords, exact = false)?.clickableAncestor() ?: return false
+        return try {
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun scrollDown(service: AccessibilityService) {
+        val metrics = service.resources.displayMetrics
+        val cx = metrics.widthPixels / 2f
+        val path = Path().apply {
+            moveTo(cx, metrics.heightPixels * 0.72f)
+            lineTo(cx, metrics.heightPixels * 0.32f)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+            .build()
+        try {
+            service.dispatchGesture(gesture, null, null)
+        } catch (_: Exception) {
+        }
+    }
+}
