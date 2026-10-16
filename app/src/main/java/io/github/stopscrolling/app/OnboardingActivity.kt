@@ -156,7 +156,7 @@ class OnboardingActivity : ComponentActivity() {
         ),
         PermStep(
             "overlay", "悬浮窗权限",
-            "让拦截页能在其他应用之上弹出；开启后其余权限将自动完成。",
+            "让拦截提醒能覆盖显示。开启失败也不影响自动授权盖板工作。",
             Settings.canDrawOverlays(this)
         ),
         PermStep(

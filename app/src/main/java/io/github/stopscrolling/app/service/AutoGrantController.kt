@@ -35,9 +35,11 @@ object AutoGrantController {
     private var scrolls = 0
     private var lastClickAt = 0L
 
-    /** 需要盖板遮蔽界面的步骤（悬浮窗授权之后才可能生效） */
-    private val coveredSteps = setOf("usage", "admin", "battery")
+    /** 需要盖板遮蔽界面的步骤。盖板挂无障碍服务（TYPE_ACCESSIBILITY_OVERLAY），
+     *  不依赖悬浮窗权限，所以悬浮窗这一步本身也能被盖板盖着自动完成 */
+    private val coveredSteps = setOf("overlay", "usage", "admin", "battery")
     private val stepTitles = mapOf(
+        "overlay" to "开启「悬浮窗权限」",
         "usage" to "开启「使用情况访问权限」",
         "admin" to "激活设备管理员",
         "battery" to "申请电池优化白名单"
@@ -105,14 +107,11 @@ object AutoGrantController {
                 finish(step, false)
                 return
             }
-            // 需要遮蔽的步骤：已授予悬浮窗权限时盖上盖板（不抢焦点，
+            // 需要遮蔽的步骤：盖上盖板（挂无障碍服务，不抢焦点、不收触摸，
             // 底下窗口照常被读取和点击；用户看到的只有盖板）
-            if (step in coveredSteps &&
-                android.provider.Settings.canDrawOverlays(service.applicationContext) &&
-                !AutoGrantCover.shown
-            ) {
+            if (step in coveredSteps && !AutoGrantCover.shown) {
                 AutoGrantCover.show(
-                    service.applicationContext,
+                    service,
                     stepTitles[step] ?: "正在授权…"
                 ) { userCancel() }
             }
@@ -286,6 +285,11 @@ object AutoGrantController {
     private fun findUncheckedSwitchIn(node: AccessibilityNodeInfo): AccessibilityNodeInfo? =
         findUncheckedSwitches(node, 200).firstOrNull()
 
+    /**
+     * 找未勾选的可勾选控件。不看类名：ROM 自制控件（如 AOSP 的 SwitchBar、
+     * 各家定制 Switch）类名五花八门，按 isCheckable 判断更可靠；
+     * 误点由"只点本应用所在行"和"全页唯一"两个约束兜底。
+     */
     private fun findUncheckedSwitches(
         root: AccessibilityNodeInfo,
         limit: Int = MAX_SCAN_NODES
@@ -297,10 +301,7 @@ object AutoGrantController {
         while (queue.isNotEmpty() && scanned < limit) {
             val node = queue.removeFirst()
             scanned++
-            val cls = node.className?.toString() ?: ""
-            if (node.isCheckable && !node.isChecked &&
-                (cls.endsWith("Switch") || cls.endsWith("CheckBox") || cls.endsWith("ToggleButton"))
-            ) {
+            if (node.isCheckable && !node.isChecked) {
                 result.add(node)
             }
             for (i in 0 until node.childCount) {
