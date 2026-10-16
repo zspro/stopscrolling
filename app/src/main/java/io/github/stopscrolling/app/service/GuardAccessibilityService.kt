@@ -29,8 +29,9 @@ import kotlinx.coroutines.launch
 class GuardAccessibilityService : AccessibilityService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var lastTriggerAt = 0L
-    private var graceRecheckScheduled = false
+    /** 防抖按包名分开：全局防抖会让 15 秒内切换的第二个应用漏拦 */
+    private val lastTriggerAt = HashMap<String, Long>()
+    private val graceRecheckScheduled = HashSet<String>()
 
     /**
      * 从服务上下文启动 Activity。
@@ -72,6 +73,8 @@ class GuardAccessibilityService : AccessibilityService() {
             val context = applicationContext
             val db = AppDatabase.get(context)
             val app = db.guardedAppDao().find(pkg) ?: return@launch
+            // 已停用的应用不做任何拦截
+            if (!app.enabled) return@launch
             val settings = SettingsStore(context)
             val now = System.currentTimeMillis()
 
@@ -87,8 +90,7 @@ class GuardAccessibilityService : AccessibilityService() {
                 val start = settings.bedtimeStartHour.first()
                 val end = settings.bedtimeEndHour.first()
                 if (UsageStatsHelper.inBedtimeWindow(start, end)) {
-                    if (now - lastTriggerAt > DEBOUNCE_MS) {
-                        lastTriggerAt = now
+                    if (debounced(pkg, now)) {
                         db.blockEventDao().insert(
                             BlockEventEntity(packageName = pkg, timestamp = now, kind = "BLOCKED")
                         )
@@ -106,8 +108,7 @@ class GuardAccessibilityService : AccessibilityService() {
 
             // 4) 超过每日限额：拦截
             if (UsageStatsHelper.isOverLimit(context, app)) {
-                if (now - lastTriggerAt > DEBOUNCE_MS) {
-                    lastTriggerAt = now
+                if (debounced(pkg, now)) {
                     db.blockEventDao().insert(
                         BlockEventEntity(packageName = pkg, timestamp = now, kind = "BLOCKED")
                     )
@@ -133,13 +134,20 @@ class GuardAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** 每应用独立防抖，返回是否放行本次拦截 */
+    private fun debounced(pkg: String, now: Long): Boolean {
+        val last = lastTriggerAt[pkg] ?: 0L
+        if (now - last <= DEBOUNCE_MS) return false
+        lastTriggerAt[pkg] = now
+        return true
+    }
+
     /** 宽限期到期后，如果用户仍停留在该应用，继续拦截 */
     private fun scheduleGraceRecheck(app: GuardedAppEntity) {
-        if (graceRecheckScheduled) return
-        graceRecheckScheduled = true
+        if (!graceRecheckScheduled.add(app.packageName)) return
         scope.launch {
             delay((app.graceUntil - System.currentTimeMillis()).coerceAtLeast(1000L) + 2000L)
-            graceRecheckScheduled = false
+            graceRecheckScheduled.remove(app.packageName)
             val foreground = UsageStatsHelper.currentForegroundPackage(applicationContext)
             if (foreground == app.packageName &&
                 app.graceUntil <= System.currentTimeMillis()

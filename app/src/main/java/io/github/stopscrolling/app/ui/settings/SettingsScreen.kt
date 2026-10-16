@@ -264,6 +264,13 @@ fun SettingsScreen(vm: MainViewModel) {
 @Composable
 private fun BedtimeCard(vm: MainViewModel) {
     val home by vm.home.collectAsStateWithLifecycle()
+    // 拖动过程只改本地状态，松手才写库（否则每滑一格写一次 DataStore）
+    var pendingStart by remember(home.bedtimeStartHour) {
+        mutableIntStateOf(home.bedtimeStartHour)
+    }
+    var pendingEnd by remember(home.bedtimeEndHour) {
+        mutableIntStateOf(home.bedtimeEndHour)
+    }
 
     Card {
         Column(Modifier.padding(16.dp)) {
@@ -274,30 +281,32 @@ private fun BedtimeCard(vm: MainViewModel) {
                 Column(Modifier.weight(1f)) {
                     Text("启用睡觉时段", fontWeight = FontWeight.SemiBold)
                     Text(
-                        "%02d:00 - %02d:00".format(home.bedtimeStartHour, home.bedtimeEndHour),
+                        "%02d:00 - %02d:00".format(pendingStart, pendingEnd),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
                 Switch(checked = home.bedtimeEnabled, onCheckedChange = { on ->
-                    vm.setBedtime(on, home.bedtimeStartHour, home.bedtimeEndHour)
+                    vm.setBedtime(on, pendingStart, pendingEnd)
                 })
             }
             Spacer(Modifier.height(8.dp))
-            Text("开始：${"%02d:00".format(home.bedtimeStartHour)}", style = MaterialTheme.typography.bodySmall)
+            Text("开始：${"%02d:00".format(pendingStart)}", style = MaterialTheme.typography.bodySmall)
             Slider(
-                value = home.bedtimeStartHour.toFloat(),
-                onValueChange = { value ->
-                    vm.setBedtime(home.bedtimeEnabled, value.toInt(), home.bedtimeEndHour)
+                value = pendingStart.toFloat(),
+                onValueChange = { pendingStart = it.toInt() },
+                onValueChangeFinished = {
+                    vm.setBedtime(home.bedtimeEnabled, pendingStart, pendingEnd)
                 },
                 valueRange = 0f..23f,
                 steps = 22
             )
-            Text("结束：${"%02d:00".format(home.bedtimeEndHour)}", style = MaterialTheme.typography.bodySmall)
+            Text("结束：${"%02d:00".format(pendingEnd)}", style = MaterialTheme.typography.bodySmall)
             Slider(
-                value = home.bedtimeEndHour.toFloat(),
-                onValueChange = { value ->
-                    vm.setBedtime(home.bedtimeEnabled, home.bedtimeStartHour, value.toInt())
+                value = pendingEnd.toFloat(),
+                onValueChange = { pendingEnd = it.toInt() },
+                onValueChangeFinished = {
+                    vm.setBedtime(home.bedtimeEnabled, pendingStart, pendingEnd)
                 },
                 valueRange = 0f..23f,
                 steps = 22

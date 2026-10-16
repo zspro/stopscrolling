@@ -139,6 +139,7 @@ object AutoGrantCover {
         val view = container ?: return
         container = null
         stepText = null
+        onCancel = null
         try {
             (view.context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
                 .removeView(view)

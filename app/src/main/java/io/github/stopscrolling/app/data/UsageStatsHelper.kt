@@ -28,17 +28,38 @@ object UsageStatsHelper {
             set(Calendar.MILLISECOND, 0)
         }.timeInMillis
 
-    /** 今天每个包的使用时长（毫秒），仅包含前台可见时间 */
+    /**
+     * 今天每个包的使用时长（毫秒），仅前台可见时间。
+     *
+     * 用事件（RESUMED/PAUSED/STOPPED）从今天零点累加，而不是 queryUsageStats：
+     * 后者的日桶按系统统计周期对齐、不按本地零点对齐，会把昨天零点后的时间算进“今天”，
+     * 导致限额被提前触发、今日数字偏大。
+     */
     fun usageTodayByPackage(context: Context): Map<String, Long> {
         if (!hasUsageAccess(context)) return emptyMap()
         val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
         val start = startOfDay()
         val now = System.currentTimeMillis()
+        val events = usm.queryEvents(start, now) ?: return emptyMap()
         val merged = HashMap<String, Long>()
-        usm.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, start, now)?.forEach { stat ->
-            if (stat.lastTimeUsed >= start && stat.totalTimeInForeground > 0) {
-                merged[stat.packageName] = (merged[stat.packageName] ?: 0L) + stat.totalTimeInForeground
+        val resumedAt = HashMap<String, Long>()
+        val e = UsageEvents.Event()
+        while (events.hasNextEvent()) {
+            events.getNextEvent(e)
+            val pkg = e.packageName ?: continue
+            when (e.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED -> resumedAt[pkg] = e.timeStamp
+                UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED -> {
+                    val t0 = resumedAt.remove(pkg) ?: continue
+                    val delta = e.timeStamp - t0
+                    if (delta > 0) merged[pkg] = (merged[pkg] ?: 0L) + delta
+                }
             }
+        }
+        // 仍在前台（有 RESUMED 无配对 PAUSED）的应用，用当前时间结算
+        for ((pkg, t0) in resumedAt) {
+            val delta = now - t0
+            if (delta > 0) merged[pkg] = (merged[pkg] ?: 0L) + delta
         }
         return merged
     }

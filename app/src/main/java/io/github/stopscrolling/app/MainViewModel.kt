@@ -69,12 +69,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }.collect { _home.value = it }
         }
-        viewModelScope.launch {
-            val since = UsageStatsHelper.startOfDay()
-            db.blockEventDao().observeCountSince("BLOCKED", since).collect { count ->
-                _home.value = _home.value.copy(blockedToday = count)
-            }
-        }
     }
 
     fun refreshUsage() {
@@ -85,7 +79,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 .sortedByDescending { it.value }
                 .take(5)
                 .map { TopAppUsage(AppInfoHelper.appLabel(getApplication(), it.key), it.value / 60_000) }
-            _home.value = _home.value.copy(usageByPackage = usage, topApps = top)
+            // 今日起点随刷新重算，跨零点后“今日已拦截”不会停在昨天
+            val blocked = db.blockEventDao().countSince("BLOCKED", UsageStatsHelper.startOfDay())
+            _home.value = _home.value.copy(
+                usageByPackage = usage,
+                topApps = top,
+                blockedToday = blocked
+            )
         }
     }
 

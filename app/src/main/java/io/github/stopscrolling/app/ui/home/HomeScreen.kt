@@ -37,6 +37,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -324,9 +326,14 @@ private fun GuardedAppCard(
             )
             Spacer(Modifier.height(8.dp))
             Text("每日限额：${app.dailyLimitMinutes} 分钟", style = MaterialTheme.typography.bodySmall)
+            var pendingLimit by remember(app.dailyLimitMinutes) {
+                mutableIntStateOf(app.dailyLimitMinutes)
+            }
             Slider(
-                value = app.dailyLimitMinutes.toFloat(),
-                onValueChange = { onLimitChange(it.toInt().coerceAtLeast(5)) },
+                value = pendingLimit.toFloat(),
+                // 只在松手时写库，拖动过程中每次滑动都写会拖垮 UI
+                onValueChange = { pendingLimit = it.toInt().coerceAtLeast(5) },
+                onValueChangeFinished = { onLimitChange(pendingLimit) },
                 valueRange = 5f..240f,
                 enabled = app.enabled
             )

@@ -49,6 +49,7 @@ import io.github.stopscrolling.app.ui.theme.StopScrollTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.random.Random
 
 /**
@@ -75,44 +76,32 @@ class GatekeeperActivity : ComponentActivity() {
         }
         onBackPressedDispatcher.addCallback(this, backCallback)
 
-        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
-        val canGrace = !bedtime && runCatching {
-            executor.submit<Boolean> {
-                kotlinx.coroutines.runBlocking {
-                    AppDatabase.get(this@GatekeeperActivity).blockEventDao()
-                        .countSince("GRACE:$pkg", UsageStatsHelper.startOfDay()) == 0
-                }
-            }.get()
-        }.getOrDefault(false)
+        // 查询放到协程里，主线程阻塞查库会 ANR
+        lifecycleScope.launch {
+            val db = AppDatabase.get(this@GatekeeperActivity)
+            val startOfToday = UsageStatsHelper.startOfDay()
+            val graceUsedToday = db.blockEventDao()
+                .countSince("GRACE:$pkg", startOfToday) > 0
+            val blockedToday = db.blockEventDao().countSince("BLOCKED", startOfToday)
 
-        val blockedToday = runCatching {
-            executor.submit<Int> {
-                kotlinx.coroutines.runBlocking {
-                    AppDatabase.get(this@GatekeeperActivity).blockEventDao()
-                        .countSince("BLOCKED", UsageStatsHelper.startOfDay())
+            val canGrace = !bedtime && !graceUsedToday
+            setContent {
+                StopScrollTheme {
+                    GatekeeperScreen(
+                        appName = targetLabel ?: pkg,
+                        usedToday = UsageStatsHelper.usageOf(this@GatekeeperActivity, pkg),
+                        isBedtime = bedtime,
+                        blockedToday = blockedToday,
+                        canGrace = canGrace,
+                        onLeave = { goHome() },
+                        onGrace = { grantGrace(pkg) }
+                    )
                 }
-            }.get()
-        }.getOrDefault(0)
-        executor.shutdown()
-
-        setContent {
-            StopScrollTheme {
-                GatekeeperScreen(
-                    appName = targetLabel ?: pkg,
-                    usedToday = UsageStatsHelper.usageOf(this, pkg),
-                    isBedtime = bedtime,
-                    blockedToday = blockedToday,
-                    canGrace = canGrace,
-                    onLeave = { goHome() },
-                    onGrace = {
-                        grantGrace(pkg)
-                        finish()
-                    }
-                )
             }
         }
     }
 
+    /** 「再刷 5 分钟」：先落库再关闭，避免异步写入被 finish() 抢先导致宽限期失效 */
     private fun grantGrace(pkg: String) {
         lifecycleScope.launch(Dispatchers.IO) {
             val db = AppDatabase.get(this@GatekeeperActivity)
@@ -121,6 +110,7 @@ class GatekeeperActivity : ComponentActivity() {
             db.blockEventDao().insert(
                 BlockEventEntity(packageName = pkg, timestamp = now, kind = "GRACE:$pkg")
             )
+            withContext(Dispatchers.Main) { finish() }
         }
     }
 

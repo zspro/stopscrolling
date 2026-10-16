@@ -7,6 +7,7 @@ import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
 import android.view.accessibility.AccessibilityNodeInfo
+import io.github.stopscrolling.app.OnboardingActivity
 import io.github.stopscrolling.app.util.PermissionChecker
 
 /**
@@ -83,11 +84,8 @@ object AutoGrantController {
     private fun returnToApp() {
         val service = GuardAccessibilityService.current ?: return
         try {
-            val intent = Intent(service.applicationContext, Class.forName(
-                "io.github.stopscrolling.app.OnboardingActivity"
-            )).addFlags(
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            )
+            val intent = Intent(service.applicationContext, OnboardingActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             service.launchActivity(intent)
         } catch (_: Throwable) {
         }
@@ -186,33 +184,26 @@ object AutoGrantController {
         service: AccessibilityService,
         root: AccessibilityNodeInfo
     ): Boolean {
-        val labelNode = findNodeByText(root, listOf(appLabel), exact = false)
+        // 应用名匹配要求接近全等，避免「微信」误命中「微信读书」这类包含关系
+        val labelNode = findNodeByText(root, listOf(appLabel), exact = true)
+            ?: findNodeByText(root, listOf(appLabel), exact = false)
         if (labelNode != null) {
             // 1) 本应用所在行内部有未勾选开关（列表式开关，如悬浮窗列表）→ 只点这个
             val row = labelNode.clickableAncestor()
             val rowSwitch = row?.let { findUncheckedSwitchIn(it) }
             if (rowSwitch != null) {
-                if (cooldownOk()) {
-                    rowSwitch.performClickSafe()
-                    lastClickAt = System.currentTimeMillis()
-                    scrolls = 0
-                }
+                if (rowSwitch.performClickSafe()) scrolls = 0
                 return false
             }
             // 2) 行内无开关 → 点行本身进入详情页
             if (row != null) {
-                if (cooldownOk()) {
-                    row.performClickSafe()
-                    lastClickAt = System.currentTimeMillis()
-                    scrolls = 0
-                }
+                if (row.performClickSafe()) scrolls = 0
                 return false
             }
             // 3) 行不可点击（标签在标题区）→ 详情页启发式：唯一未勾选开关才点
             val switches = findUncheckedSwitches(root)
-            if (switches.size == 1 && cooldownOk()) {
+            if (switches.size == 1) {
                 switches[0].performClickSafe()
-                lastClickAt = System.currentTimeMillis()
             }
             return false
         }
@@ -245,8 +236,10 @@ object AutoGrantController {
             val desc = node.contentDescription?.toString() ?: ""
             val hit = keywords.any { kw ->
                 if (exact) text == kw || desc == kw
-                else (text.isNotEmpty() && text.contains(kw, ignoreCase = true)) ||
-                    (desc.isNotEmpty() && desc.contains(kw, ignoreCase = true))
+                else (text.isNotEmpty() && text.length < kw.length + 2 &&
+                    text.contains(kw, ignoreCase = true)) ||
+                    (desc.isNotEmpty() && desc.length < kw.length + 2 &&
+                        desc.contains(kw, ignoreCase = true))
             }
             if (hit) return node
             for (i in 0 until node.childCount) {
@@ -295,14 +288,28 @@ object AutoGrantController {
         return null
     }
 
-    private fun AccessibilityNodeInfo.performClickSafe(): Boolean =
-        try {
-            if (isClickable) performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            else clickableAncestor()
-                ?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+    /** 统一走冷却 + 手势点击（ACTION_CLICK 在部分 ROM 的设置页不生效） */
+    private fun AccessibilityNodeInfo.performClickSafe(): Boolean {
+        if (!cooldownOk()) return false
+        val service = GuardAccessibilityService.current ?: return false
+        val node = if (isClickable) this else clickableAncestor() ?: return false
+        val rect = android.graphics.Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.isEmpty) return false
+        val path = Path().apply {
+            moveTo(rect.exactCenterX(), rect.exactCenterY())
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+            .build()
+        val dispatched = try {
+            service.dispatchGesture(gesture, null, null)
         } catch (_: Exception) {
             false
         }
+        if (dispatched) lastClickAt = System.currentTimeMillis()
+        return dispatched
+    }
 
     /**
      * 弹窗按钮点击：先精确匹配「允许」，再包含匹配（排除「不允许」）。

@@ -16,6 +16,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -29,23 +30,24 @@ import io.github.stopscrolling.app.ui.pick.PickAppsScreen
 import io.github.stopscrolling.app.ui.settings.SettingsScreen
 import io.github.stopscrolling.app.ui.theme.StopScrollTheme
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // 首次启动：先进引导页（欢迎 + 权限自动授权链）
-        val onboardingDone = runBlocking {
-            SettingsStore(applicationContext).onboardingDone.first()
-        }
-        if (!onboardingDone) {
-            startActivity(android.content.Intent(this, OnboardingActivity::class.java))
-        }
-
         setContent {
             StopScrollTheme {
+                // 首次启动：先进引导页（欢迎 + 权限自动授权链）。
+                // 必须异步读 DataStore，主线程 runBlocking 会触发 ANR。
+                LaunchedEffect(Unit) {
+                    val onboardingDone = SettingsStore(applicationContext).onboardingDone.first()
+                    if (!onboardingDone) {
+                        startActivity(
+                            android.content.Intent(this@MainActivity, OnboardingActivity::class.java)
+                        )
+                    }
+                }
                 StopScrollAppUi()
             }
         }
