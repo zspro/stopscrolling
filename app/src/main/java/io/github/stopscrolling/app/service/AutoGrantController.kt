@@ -187,7 +187,12 @@ object AutoGrantController {
         }
     }
 
-    /** 取"非本应用"窗口的根节点：遍历所有窗口，跳过自家的盖板/停止按钮 */
+    /**
+     * 取"非本应用"窗口的根节点：遍历所有窗口（需 flagRetrieveInteractiveWindows，
+     * 已在 accessibility_service_config.xml 声明，否则 windows 恒为空、自动化必死），
+     * 跳过自家的盖板/停止键（TYPE_ACCESSIBILITY_OVERLAY）、键盘（TYPE_INPUT_METHOD），
+     * 从最顶层往下取第一个真实系统/应用窗口——保证弹窗场景选中的是弹窗而非底下列表。
+     */
     private fun activeRootOutsideSelf(service: AccessibilityService): AccessibilityNodeInfo? {
         val windows: List<AccessibilityWindowInfo> = try {
             service.windows ?: emptyList()
@@ -195,15 +200,20 @@ object AutoGrantController {
             emptyList()
         }
         if (windows.isNotEmpty()) {
-            // 优先取 z 序最高的非自家窗口
-            for (i in windows.indices.reversed()) {
+            val ordered = windows.sortedByDescending { it.layer }
+            for (window in ordered) {
+                when (window.type) {
+                    AccessibilityWindowInfo.TYPE_INPUT_METHOD,
+                    AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY -> continue
+                }
                 val root = try {
-                    windows[i].root
+                    window.root
                 } catch (_: Throwable) {
                     null
                 }
-                val pkg = root?.packageName?.toString()
-                if (root != null && pkg != null && pkg != service.packageName) return root
+                val pkg = root?.packageName?.toString() ?: continue
+                if (pkg == service.packageName) continue
+                return root
             }
             return null
         }
