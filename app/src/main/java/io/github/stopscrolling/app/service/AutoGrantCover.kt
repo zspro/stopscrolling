@@ -33,6 +33,7 @@ object AutoGrantCover {
     private var coverView: LinearLayout? = null
     private var stopView: LinearLayout? = null
     private var stepText: TextView? = null
+    private var statusText: TextView? = null
     private var onCancel: (() -> Unit)? = null
 
     val shown: Boolean get() = coverView != null
@@ -74,6 +75,11 @@ object AutoGrantCover {
             text = stepLabel
         }
         stepText = step
+        statusText = TextView(service).apply {
+            setTextColor(Color.parseColor("#5F6B77"))
+            textSize = 12f
+            gravity = Gravity.CENTER
+        }
         root.addView(logo)
         root.addView(
             subtitle,
@@ -88,6 +94,13 @@ object AutoGrantCover {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(service, 28) }
+        )
+        root.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(service, 14) }
         )
 
         val coverParams = WindowManager.LayoutParams(
@@ -123,6 +136,34 @@ object AutoGrantCover {
             }
         }
         stopPanel.addView(stop)
+        val copy = Button(service).apply {
+            text = "复制诊断"
+            textSize = 12f
+            setTextColor(Color.parseColor("#6E7B87"))
+            background = GradientDrawable().apply {
+                cornerRadius = 40f
+                setColor(Color.parseColor("#1A222A"))
+            }
+            setPadding(36, 12, 36, 12)
+            setOnClickListener {
+                try {
+                    val cm = service.getSystemService(Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(
+                        android.content.ClipData.newPlainText("diag", AutoGrantController.dumpTrace())
+                    )
+                    android.widget.Toast.makeText(service, "诊断已复制，发给开发者即可", android.widget.Toast.LENGTH_SHORT).show()
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        stopPanel.addView(
+            copy,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(service, 6) }
+        )
 
         val stopParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -146,11 +187,17 @@ object AutoGrantCover {
             coverView = null
             stopView = null
             stepText = null
+            statusText = null
         }
     }
 
     fun update(text: String) {
         stepText?.text = text
+    }
+
+    /** 实时诊断状态行（引擎每轮 tick 刷新） */
+    fun updateStatus(line: String) {
+        statusText?.text = line
     }
 
     fun hide() {
@@ -159,6 +206,7 @@ object AutoGrantCover {
         coverView = null
         stopView = null
         stepText = null
+        statusText = null
         onCancel = null
         val wm = cover.context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         removeQuietly(wm, cover)

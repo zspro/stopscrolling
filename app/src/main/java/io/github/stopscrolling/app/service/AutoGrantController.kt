@@ -1,11 +1,13 @@
 package io.github.stopscrolling.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import io.github.stopscrolling.app.OnboardingActivity
@@ -35,6 +37,10 @@ object AutoGrantController {
     private var scrolls = 0
     private var lastClickAt = 0L
 
+    /** 本轮 tick 执行的最后动作（显示在盖板上，写进诊断） */
+    @Volatile
+    private var lastAction = "等待"
+
     /** 需要盖板遮蔽界面的步骤。盖板挂无障碍服务（TYPE_ACCESSIBILITY_OVERLAY），
      *  不依赖悬浮窗权限，所以悬浮窗这一步本身也能被盖板盖着自动完成 */
     private val coveredSteps = setOf("overlay", "usage", "admin", "battery")
@@ -50,6 +56,48 @@ object AutoGrantController {
     private const val MAX_SCROLLS = 12
     private const val CLICK_COOLDOWN_MS = 1200L
     private const val MAX_SCAN_NODES = 1500
+
+    // ── 诊断追踪：记录引擎每一步"看到了什么/做了什么"，随包可导出 ──
+    private val trace = ArrayDeque<String>()
+    private val traceLock = Any()
+
+    private fun logTrace(msg: String) {
+        val line = "[%02d.%03d] %s".format(
+            (SystemClock.elapsedRealtime() / 1000) % 100,
+            SystemClock.elapsedRealtime() % 1000,
+            msg
+        )
+        synchronized(traceLock) {
+            trace.addLast(line)
+            while (trace.size > 300) trace.removeFirst()
+        }
+    }
+
+    /** 导出完整诊断日志（盖板"复制诊断"按钮调用） */
+    fun dumpTrace(): String = synchronized(traceLock) {
+        buildString {
+            appendLine("=== 放下手机 自动授权诊断 ===")
+            appendLine("机型: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} Android ${android.os.Build.VERSION.RELEASE}")
+            appendLine("步骤: $activeStepId")
+            trace.forEach { appendLine(it) }
+        }
+    }
+
+    private fun serviceDiag(service: AccessibilityService): String {
+        return try {
+            val info = service.serviceInfo
+            val hasWindowsFlag = (info.flags and AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS) != 0
+            val canGesture = (info.capabilities and AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES) != 0
+            val winCount = try {
+                (service.windows ?: emptyList()).size
+            } catch (_: Throwable) {
+                -1
+            }
+            "flags(windows=$hasWindowsFlag,gesture=$canGesture) windows=$winCount"
+        } catch (_: Throwable) {
+            "serviceInfo不可读"
+        }
+    }
 
     fun start(
         stepId: String,
@@ -99,11 +147,21 @@ object AutoGrantController {
             val step = activeStepId ?: return
             val service = GuardAccessibilityService.current
             if (service == null) {
+                attempts++
+                logTrace("无障碍服务未运行 current=null (尝试 $attempts)")
+                if (attempts > MAX_ATTEMPTS) {
+                    finish(step, false)
+                    return
+                }
                 scheduleNext()
                 return
             }
             attempts++
+            if (attempts == 1 || attempts % 5 == 0) {
+                logTrace("tick#$attempts [$step] ${serviceDiag(service)}")
+            }
             if (attempts > MAX_ATTEMPTS) {
+                logTrace("超时放弃 $step")
                 finish(step, false)
                 return
             }
@@ -115,11 +173,17 @@ object AutoGrantController {
                     stepTitles[step] ?: "正在授权…"
                 ) { userCancel() }
             }
+            var action = "等待"
             val ok = try {
-                tick(service, step)
-            } catch (_: Exception) {
+                val r = tick(service, step)
+                action = lastAction
+                r
+            } catch (e: Exception) {
+                action = "异常:${e.javaClass.simpleName}"
+                logTrace("tick异常: ${e}")
                 false
             }
+            AutoGrantCover.updateStatus("$action · 第 $attempts/$MAX_ATTEMPTS 轮")
             if (ok) {
                 finish(step, true)
                 return
@@ -165,10 +229,19 @@ object AutoGrantController {
 
         // 选根窗口：必须跳过自家窗口（盖板/停止按钮都是本应用的悬浮窗），
         // 否则会被误判为"用户回到自己界面"，链条当场自杀
-        val root = activeRootOutsideSelf(service) ?: return false
+        val root = activeRootOutsideSelf(service)
+        if (root == null) {
+            lastAction = "看不到设置页"
+            if (attempts % 5 == 1) {
+                logTrace("[$step] 无可用外部窗口（可能全被自家盖板覆盖或 windows 空）")
+            }
+            return false
+        }
+        lastAction = "页面:${root.packageName.toString().substringAfterLast('.')}"
 
         // 回到了自己的界面（非通知弹窗流程）→ 停止轮询，链条由 ON_RESUME 续推
         if (root.packageName == service.packageName && step != "notifications") {
+            logTrace("[$step] 检测到回到自身界面，停止轮询")
             finish(step, false)
             return false
         }
@@ -234,11 +307,15 @@ object AutoGrantController {
             val row = labelNode.clickableAncestor()
             val rowSwitch = row?.let { findUncheckedSwitchIn(it) }
             if (rowSwitch != null) {
+                lastAction = "点行内开关"
+                logTrace("[$activeStepId] 命中行内开关 ${boundsOf(rowSwitch)}")
                 if (rowSwitch.performClickSafe()) scrolls = 0
                 return false
             }
             // 2) 行内无开关 → 点行本身进入详情页
             if (row != null) {
+                lastAction = "点行进详情"
+                logTrace("[$activeStepId] 点击应用行 ${boundsOf(row)}")
                 if (row.performClickSafe()) scrolls = 0
                 return false
             }
@@ -247,6 +324,8 @@ object AutoGrantController {
             //    可点击行（借鉴别刷了 UNIQUE_TRAILING_SWITCH 策略）；c. 都不行就滚动
             val switches = findUncheckedSwitches(root)
             if (switches.size == 1) {
+                lastAction = "点详情开关"
+                logTrace("[$activeStepId] 唯一开关 ${boundsOf(switches[0])}")
                 switches[0].performClickSafe()
                 return false
             }
@@ -260,11 +339,16 @@ object AutoGrantController {
             if (scrolls < MAX_SCROLLS && cooldownOk()) {
                 scrollDown(service)
                 scrolls++
+                lastAction = "详情页滚动 $scrolls"
+                logTrace("[$activeStepId] 详情页滚动 $scrolls，未见开关")
                 lastClickAt = System.currentTimeMillis()
             }
             return false
         }
         // 4) 找不到本应用行 → 滑动列表查找
+        if (scrolls == 0 && labelNode == null) {
+            lastAction = "找应用行…"
+        }
         if (scrolls < MAX_SCROLLS && cooldownOk()) {
             scrollDown(service)
             scrolls++
@@ -336,6 +420,14 @@ object AutoGrantController {
             }
         }
         return result
+    }
+
+    private fun boundsOf(node: AccessibilityNodeInfo): String = try {
+        val r = android.graphics.Rect()
+        node.getBoundsInScreen(r)
+        "(${r.left},${r.top},${r.width()}x${r.height()})"
+    } catch (_: Throwable) {
+        "(?)"
     }
 
     private fun AccessibilityNodeInfo.clickableAncestor(): AccessibilityNodeInfo? {
