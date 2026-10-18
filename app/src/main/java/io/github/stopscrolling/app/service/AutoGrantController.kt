@@ -99,6 +99,58 @@ object AutoGrantController {
         }
     }
 
+    /** 节点树透视：列出全部窗口与顶层 60 个节点的 id/文本/类名/状态 */
+    private fun dumpWindowTree(service: AccessibilityService) {
+        try {
+            val wins = service.windows ?: emptyList()
+            logTrace("── 窗口列表(${wins.size}) ──")
+            for (w in wins) {
+                val rootPkg = try {
+                    w.root?.packageName?.toString() ?: "?"
+                } catch (_: Throwable) {
+                    "?"
+                }
+                logTrace("win type=${w.type} layer=${w.layer} focus=${w.isFocused} pkg=$rootPkg")
+            }
+            val root = service.rootInActiveWindow ?: run {
+                logTrace("rootInActiveWindow=null")
+                return
+            }
+            logTrace("── 节点树(root=${root.packageName}/${root.className}) ──")
+            dumpNode(root, 0, 0)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun dumpNode(node: AccessibilityNodeInfo, depth: Int, count: Int): Int {
+        if (count >= 60) return count
+        try {
+            val id = node.viewIdResourceName?.substringAfterLast('/') ?: "-"
+            val text = (node.text?.toString() ?: "").take(20)
+            val flags = buildString {
+                if (node.isClickable) append("C")
+                if (node.isCheckable) append("K")
+                if (node.isChecked) append("✓")
+                if (node.isScrollable) append("S")
+            }.ifEmpty { "_" }
+            logTrace(
+                "n$count d$depth $flags id=$id cls=${node.className?.toString()
+                    ?.substringAfterLast('.')} txt=[$text]"
+            )
+            var c = count + 1
+            if (depth < 6) {
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    c = dumpNode(child, depth + 1, c)
+                    if (c >= 60) break
+                }
+            }
+            return c
+        } catch (_: Throwable) {
+            return count + 1
+        }
+    }
+
     fun start(
         stepId: String,
         label: String,
@@ -159,6 +211,9 @@ object AutoGrantController {
             attempts++
             if (attempts == 1 || attempts % 5 == 0) {
                 logTrace("tick#$attempts [$step] ${serviceDiag(service)}")
+            }
+            if (attempts == 1 || attempts == 8) {
+                dumpWindowTree(service)
             }
             if (attempts > MAX_ATTEMPTS) {
                 logTrace("超时放弃 $step")
@@ -299,6 +354,31 @@ object AutoGrantController {
         service: AccessibilityService,
         root: AccessibilityNodeInfo
     ): Boolean {
+        // 0) 按 viewId 猎开关（别刷了策略：各家 ROM 的开关是自定义 ID，
+        //    不一定暴露 isCheckable 语义——HyperOS 3 上就是这种情况）。
+        //    只点"未勾选"的，且必须有文字层保护（页面含本应用名才敢动手）。
+        val rootPkg = root.packageName?.toString() ?: ""
+        if (findNodeByText(root, listOf(appLabel), exact = true) != null) {
+            for (id in SWITCH_ID_CANDIDATES) {
+                val nodes = try {
+                    root.findAccessibilityNodeInfosByViewId("$rootPkg:id/$id")
+                } catch (_: Throwable) {
+                    null
+                } ?: continue
+                for (n in nodes) {
+                    val checked = try {
+                        n.isChecked
+                    } catch (_: Throwable) {
+                        true
+                    }
+                    if (!checked) {
+                        lastAction = "ID开关:$id"
+                        logTrace("[${activeStepId}] ID猎中 $rootPkg:id/$id ${boundsOf(n)}")
+                        if (n.performClickSafe()) return false
+                    }
+                }
+            }
+        }
         // 应用名匹配要求接近全等，避免「微信」误命中「微信读书」这类包含关系
         val labelNode = findNodeByText(root, listOf(appLabel), exact = true)
             ?: findNodeByText(root, listOf(appLabel), exact = false)
@@ -421,6 +501,12 @@ object AutoGrantController {
         }
         return result
     }
+
+    /** 各 ROM 开关控件常见资源 ID（别刷了证据库：AOSP=switchWidget/switch_widget，MIUI=switcher 等） */
+    private val SWITCH_ID_CANDIDATES = listOf(
+        "switchWidget", "switch_widget", "switcher", "switch_btn", "switchButton",
+        "switch", "toggle", "checkbox", "checked_btn", "auto_checkbox", "switch_bar"
+    )
 
     private fun boundsOf(node: AccessibilityNodeInfo): String = try {
         val r = android.graphics.Rect()
