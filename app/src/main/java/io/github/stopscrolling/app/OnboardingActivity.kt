@@ -217,7 +217,17 @@ class OnboardingActivity : ComponentActivity() {
                     // 通知权限走运行时对话框回调推进，避免重复触发
                     if (stepId != "notifications") {
                         refreshSteps()
-                        if (success) scheduleNextIfChaining()
+                        if (success) {
+                            scheduleNextIfChaining()
+                        } else {
+                            // 自动授权失败（超时/页面不识别）：不卡流程，转手动模式。
+                            // 与同类应用一致：指引文案 + 手动按钮 + 轮询检测自动打勾。
+                            android.widget.Toast.makeText(
+                                this,
+                                "自动授权没成功，请按指引手动完成，完成后会自动继续",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
                     }
                 }
             },

@@ -47,9 +47,9 @@ object AutoGrantController {
 
     private const val TICK_MS = 700L
     private const val MAX_ATTEMPTS = 90 // 约 1 分钟后放弃，回落到手动
-    private const val MAX_SCROLLS = 6
+    private const val MAX_SCROLLS = 12
     private const val CLICK_COOLDOWN_MS = 1200L
-    private const val MAX_SCAN_NODES = 400
+    private const val MAX_SCAN_NODES = 1500
 
     fun start(
         stepId: String,
@@ -242,10 +242,25 @@ object AutoGrantController {
                 if (row.performClickSafe()) scrolls = 0
                 return false
             }
-            // 3) 行不可点击（标签在标题区）→ 详情页启发式：唯一未勾选开关才点
+            // 3) 行不可点击（标签在标题区）→ 详情页启发式：
+            //    a. 全页唯一未勾选开关直接点；b. 否则点"行尾未勾选开关"所在的
+            //    可点击行（借鉴别刷了 UNIQUE_TRAILING_SWITCH 策略）；c. 都不行就滚动
             val switches = findUncheckedSwitches(root)
             if (switches.size == 1) {
                 switches[0].performClickSafe()
+                return false
+            }
+            for (sw in switches) {
+                val text = (sw.text?.toString() ?: "") +
+                    (sw.contentDescription?.toString() ?: "")
+                if (text.contains("允许", true) || text.contains("不允许", true)) continue
+                val target = sw.clickableAncestor() ?: sw
+                if (target.performClickSafe()) return false
+            }
+            if (scrolls < MAX_SCROLLS && cooldownOk()) {
+                scrollDown(service)
+                scrolls++
+                lastClickAt = System.currentTimeMillis()
             }
             return false
         }
@@ -277,10 +292,12 @@ object AutoGrantController {
             val text = node.text?.toString() ?: ""
             val desc = node.contentDescription?.toString() ?: ""
             val hit = keywords.any { kw ->
+                // 非精确匹配允许长文本（如设备管理页的「激活此设备管理应用」命中「激活」），
+                // 上限放宽到 kw+14 字符；误点风险由调用方的排除词（denyWords）兜底
                 if (exact) text == kw || desc == kw
-                else (text.isNotEmpty() && text.length < kw.length + 2 &&
+                else (text.isNotEmpty() && text.length < kw.length + 14 &&
                     text.contains(kw, ignoreCase = true)) ||
-                    (desc.isNotEmpty() && desc.length < kw.length + 2 &&
+                    (desc.isNotEmpty() && desc.length < kw.length + 14 &&
                         desc.contains(kw, ignoreCase = true))
             }
             if (hit) return node
@@ -370,14 +387,32 @@ object AutoGrantController {
     /** 确认按钮（如无障碍开启前的「确定/允许」弹窗），含安全排除否定词 */
     private fun clickConfirm(root: AccessibilityNodeInfo, keywords: List<String>): Boolean {
         val denyWords = listOf("取消", "不允许", "拒绝", "Cancel", "Deny", "Don't allow")
-        var node = findNodeByText(root, keywords, exact = true)?.clickableAncestor()
-        if (node == null) {
-            node = findNodeByText(root, keywords, exact = false)?.clickableAncestor()
-        }
-        if (node != null) {
+        // 精确匹配优先
+        findNodeByText(root, keywords, exact = true)?.clickableAncestor()?.let { node ->
             val text = (node.text?.toString() ?: "") + (node.contentDescription?.toString() ?: "")
-            if (denyWords.any { text.contains(it, ignoreCase = true) }) return false
-            return node.performClickSafe()
+            if (denyWords.none { text.contains(it, ignoreCase = true) }) {
+                return node.performClickSafe()
+            }
+        }
+        // 包含匹配：搜索过程中同时排除拒绝词，避免「不允许…」抢先命中后整轮放弃
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        var scanned = 0
+        while (queue.isNotEmpty() && scanned < MAX_SCAN_NODES) {
+            val node = queue.removeFirst()
+            scanned++
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val isAllow = keywords.any { (text.contains(it, true) || desc.contains(it, true)) }
+            val isDeny = denyWords.any { (text.contains(it, true) || desc.contains(it, true)) }
+            if (isAllow && !isDeny) {
+                node.clickableAncestor()?.let { target ->
+                    if (target.performClickSafe()) return true
+                }
+            }
+            for (i in 0 until node.childCount) {
+                node.getChild(i)?.let { queue.add(it) }
+            }
         }
         return false
     }
