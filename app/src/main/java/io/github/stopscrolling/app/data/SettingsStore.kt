@@ -20,6 +20,14 @@ class SettingsStore(private val context: Context) {
     private val BEDTIME_END = intPreferencesKey("bedtime_end_hour")
     private val ONBOARDING_DONE = booleanPreferencesKey("onboarding_done")
 
+    // ── 防改时间作弊基线（TimeChangeReceiver 维护）──
+    private val TAMPER_COUNT = intPreferencesKey("time_tamper_count")
+    private val LAST_TAMPER_AT = longPreferencesKey("time_last_tamper_at")
+    private val TAMPER_ACK_AT = longPreferencesKey("time_tamper_ack_at")
+    private val LAST_WALL_CLOCK = longPreferencesKey("clock_baseline_wall")
+    private val LAST_ELAPSED = longPreferencesKey("clock_baseline_elapsed")
+    private val LAST_BOOT_COUNT = intPreferencesKey("clock_baseline_boot")
+
     /** 专注模式结束时间戳，0 表示未开启 */
     val focusEndAt: Flow<Long> = context.dataStore.data.map { it[FOCUS_END] ?: 0L }
 
@@ -50,6 +58,42 @@ class SettingsStore(private val context: Context) {
             it[BEDTIME_ENABLED] = enabled
             it[BEDTIME_START] = startHour
             it[BEDTIME_END] = endHour
+        }
+    }
+
+    // ── 防改时间作弊 ──
+
+    /** 检测到的可疑改时间次数 */
+    val timeTamperCount: Flow<Int> = context.dataStore.data.map { it[TAMPER_COUNT] ?: 0 }
+
+    /** 最近一次可疑改动时间戳，0 表示从未 */
+    val lastTamperAt: Flow<Long> = context.dataStore.data.map { it[LAST_TAMPER_AT] ?: 0L }
+
+    /** 用户已确认查看的时间戳，0 表示有未读告警 */
+    val tamperAckAt: Flow<Long> = context.dataStore.data.map { it[TAMPER_ACK_AT] ?: 0L }
+
+    val lastWallClock: Flow<Long> = context.dataStore.data.map { it[LAST_WALL_CLOCK] ?: 0L }
+    val lastElapsedRealtime: Flow<Long> = context.dataStore.data.map { it[LAST_ELAPSED] ?: 0L }
+    val lastBootCount: Flow<Int> = context.dataStore.data.map { it[LAST_BOOT_COUNT] ?: -1 }
+
+    suspend fun recordTimeTamper(atWallClock: Long) {
+        context.dataStore.edit {
+            it[TAMPER_COUNT] = (it[TAMPER_COUNT] ?: 0) + 1
+            it[LAST_TAMPER_AT] = atWallClock
+        }
+    }
+
+    /** 用户点掉告警横幅 */
+    suspend fun ackTimeTamper() {
+        context.dataStore.edit { it[TAMPER_ACK_AT] = System.currentTimeMillis() }
+    }
+
+    /** 刷新时钟基线，供下次对比 */
+    suspend fun updateClockBaseline(wall: Long, elapsed: Long, bootCount: Int) {
+        context.dataStore.edit {
+            it[LAST_WALL_CLOCK] = wall
+            it[LAST_ELAPSED] = elapsed
+            it[LAST_BOOT_COUNT] = bootCount
         }
     }
 }

@@ -31,7 +31,11 @@ data class HomeState(
     val bedtimeActive: Boolean = false,
     val bedtimeEnabled: Boolean = false,
     val bedtimeStartHour: Int = 23,
-    val bedtimeEndHour: Int = 7
+    val bedtimeEndHour: Int = 7,
+    /** 检测到的可疑改时间次数 */
+    val timeTamperCount: Int = 0,
+    /** 是否有未读的改时间告警（首页横幅） */
+    val timeTamperUnread: Boolean = false
 )
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -69,6 +73,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }.collect { _home.value = it }
         }
+        // 防改时间作弊：单独一条流，避免超 5 参 combine 的数组形态
+        viewModelScope.launch {
+            combine(
+                settings.timeTamperCount,
+                settings.lastTamperAt,
+                settings.tamperAckAt
+            ) { count, lastTamper, ackAt ->
+                _home.value.copy(
+                    timeTamperCount = count,
+                    timeTamperUnread = count > 0 && lastTamper > ackAt
+                )
+            }.collect { _home.value = it }
+        }
+    }
+
+    /** 用户确认改时间告警 */
+    fun ackTimeTamper() {
+        viewModelScope.launch { settings.ackTimeTamper() }
     }
 
     fun refreshUsage() {

@@ -97,5 +97,23 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- 防改时间作弊：系统时间/时区变更时做单调时钟交叉校验 -->
+        <receiver
+            android:name=".service.TimeChangeReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 守护自愈：周期自检无障碍服务存活，断线发高优通知 -->
+        <receiver
+            android:name=".service.GuardWatchdogReceiver"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 </manifest>

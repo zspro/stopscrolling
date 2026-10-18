@@ -22,6 +22,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -42,6 +43,7 @@ import io.github.stopscrolling.app.MainViewModel
 import io.github.stopscrolling.app.data.UsageStatsHelper
 import io.github.stopscrolling.app.service.GuardAccessibilityService
 import io.github.stopscrolling.app.util.PermissionChecker
+import io.github.stopscrolling.app.util.RomCompat
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -236,6 +238,20 @@ fun SettingsScreen(vm: MainViewModel) {
 
             item {
                 Spacer(Modifier.height(8.dp))
+                Text("ROM 兼容性", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "国产 ROM 的省电策略会悄悄杀掉守护。按你的手机品牌，把「放下手机」加入自启动白名单并设为不省电限制——每条入口都带兜底，点了必有响应。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            item {
+                RomCard()
+            }
+
+            item {
+                Spacer(Modifier.height(8.dp))
                 Text("关于", style = MaterialTheme.typography.titleMedium)
             }
             item {
@@ -346,6 +362,44 @@ private fun PermCard(
             if (!granted) {
                 Button(onClick = onFix) { Text("去开启") }
             }
+        }
+    }
+}
+
+@Composable
+private fun RomCard() {
+    val context = LocalContext.current
+    val romName = remember { RomCompat.detect() }
+    val links = remember { RomCompat.jumps() }
+    Card {
+        Column(Modifier.padding(16.dp)) {
+            Text("当前 ROM：$romName", fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            links.forEach { link ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(link.title)
+                        Text(
+                            link.desc,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = { RomCompat.launch(context, link) }) {
+                        Text("去设置")
+                    }
+                }
+            }
+            Text(
+                "跳转失败时会自动落到本应用详情页。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
